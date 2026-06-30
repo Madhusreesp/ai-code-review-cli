@@ -1,0 +1,32 @@
+# AI Code Review CLI — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Core AI / LLM
+google-generativeai>=0.7.0,<1.0.0
+
+# google-generativeai depends on google-api-core; pin for stability
+google-api-core>=2.19.0,<3.0.0
+
+# Data validation & structured output
+pydantic>=2.7.0,<3.0.0
+
+# CLI framework
+typer>=0.12.0,<1.0.0
+
+# Rich terminal output
+rich>=13.7.0,<14.0.0
+
+# GitHub API client
+PyGithub>=2.3.0,<3.0.0
+
+# Git operations
+GitPython>=3.1.40,<4.0.0
+
+# HTTP client (used by github_client for raw diff fetching)
+requests>=2.31.0,<3.0.0
+
+# Type annotation backports for Python < 3.10
+typing_extensions>=4.11.0
+
+# .env file support
+python-dotenv>=1.0.0,<2.0.0
