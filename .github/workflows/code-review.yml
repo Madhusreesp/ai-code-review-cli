@@ -67,7 +67,7 @@ jobs:
       # ------------------------------------------------------------------ #
       - name: Run AI Code Review
         run: |
-          python -m src.cli review \
+          python -m src.cli \
             --pr-number "${{ github.event.pull_request.number }}" \
             --repo      "${{ github.repository }}" \
             --model     "gemini-2.5-flash"
