@@ -42,7 +42,7 @@ from src.reviewer import AIReviewer
 
 app = typer.Typer(
     name="ai-review",
-    help="🤖 AI-powered code review using OpenAI and GitHub.",
+    help="🤖 AI-powered code review using Gemini and GitHub.",
     add_completion=False,
     rich_markup_mode="rich",
 )
@@ -126,6 +126,24 @@ def _print_banner() -> None:
         )
     )
     console.print()
+
+
+def evaluate_and_exit(session: ReviewSession) -> None:
+    """
+    Exit with code 1 if any critical-severity issue was found, else exit 0.
+
+    Called after --pr-number and --diff modes so GitHub Actions can block
+    the PR merge when critical issues are present. The --file mode is a
+    local review tool and intentionally does not call this function.
+    """
+    if session.has_critical_issues:
+        critical_count = sum(len(r.critical_issues) for r in session.results)
+        console.print(
+            f"[bold red]🚫 Blocking: {critical_count} critical issue(s) found. "
+            "Fix them before merging.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=0)
 
 
 def _render_result(result: CodeReviewResult) -> None:
@@ -242,7 +260,7 @@ def _run_review_and_display(
             progress.add_task("[cyan]Posting review to GitHub PR…", total=None)
             gh_client = GitHubClient(token=github_token, repo_name=repo)
             try:
-                gh_client.post_review(pr_number=pr_number, session=session)
+                gh_client.post_inline_comments(pr_number=pr_number, session=session)
                 console.print(
                     f"[bold green]✅ Review posted to {repo}#PR{pr_number}[/bold green]"
                 )
@@ -353,13 +371,14 @@ def review(
             for f in diff_files
         ]
 
-        _run_review_and_display(
+        session = _run_review_and_display(
             changed_files=changed_files,
             reviewer=reviewer,
             pr_number=pr_number,
             repo=repo,
             github_token=None if no_post else github_token,
         )
+        evaluate_and_exit(session)
 
     # ------------------------------------------------------------------ #
     # Mode 2: Single local file
@@ -381,6 +400,7 @@ def review(
             changed_files=[changed_file],
             reviewer=reviewer,
         )
+        # --file mode: local review only, no CI exit-code blocking
 
     # ------------------------------------------------------------------ #
     # Mode 3: Local git diff
@@ -396,10 +416,11 @@ def review(
             err_console.print(f"[bold red]Git error:[/bold red] {exc}")
             raise typer.Exit(1) from exc
 
-        _run_review_and_display(
+        session = _run_review_and_display(
             changed_files=changed_files,
             reviewer=reviewer,
         )
+        evaluate_and_exit(session)
 
     # ------------------------------------------------------------------ #
     # No mode selected

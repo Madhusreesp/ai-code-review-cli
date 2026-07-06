@@ -1,5 +1,5 @@
 """
-AI-powered code reviewer using the Google Gemini API.
+AI-powered code reviewer using the Google Gemini API (google-genai SDK).
 
 Sends code diffs to Gemini and parses the response directly into
 CodeReviewResult Pydantic models with retry logic and graceful
@@ -13,14 +13,9 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-import google.generativeai as genai
-from google.api_core.exceptions import (
-    DeadlineExceeded,
-    ResourceExhausted,
-    GoogleAPICallError,
-    ServiceUnavailable,
-)
-from google.generativeai.types import GenerationConfig
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types
 from pydantic import ValidationError
 
 from src.models import CodeReviewResult, Issue, ReviewSession
@@ -79,16 +74,33 @@ Return ONLY the JSON object described in the instructions. No prose, no markdown
 # ---------------------------------------------------------------------------
 # Generation config — enforces JSON output and bounds resource consumption
 # (fixes CWE-400 LLM Unbounded Consumption)
+#
+# HttpOptions.timeout is in milliseconds in the new SDK.
 # ---------------------------------------------------------------------------
 
-_GENERATION_CONFIG = GenerationConfig(
-    temperature=0.1,          # low temperature for deterministic structured output
-    max_output_tokens=4096,   # hard cap — prevents unbounded token consumption
+_GENERATE_CONFIG = types.GenerateContentConfig(
+    system_instruction=SYSTEM_PROMPT,
+    temperature=0.1,           # low temperature for deterministic structured output
+    max_output_tokens=4096,    # hard cap — prevents unbounded token consumption
     response_mime_type="application/json",  # Gemini native JSON mode
+    http_options=types.HttpOptions(timeout=60_000),  # 60 s in milliseconds
 )
 
-# Request-level timeout in seconds passed via request_options
-_REQUEST_TIMEOUT = 60
+# ---------------------------------------------------------------------------
+# Exception mapping
+#
+# google.genai.errors hierarchy:
+#   APIError (base)
+#   ├── ClientError  (4xx) — includes 429 Too Many Requests (rate-limit)
+#   └── ServerError  (5xx) — includes 503 Service Unavailable
+#
+# Retry branches:
+#   ClientError (429) + ServerError (503) → transient, exponential backoff
+#   APIError (other 4xx, e.g. 400 bad request, 401 invalid key) → non-retryable
+# ---------------------------------------------------------------------------
+
+_RETRYABLE_ERRORS = (genai_errors.ClientError, genai_errors.ServerError)
+_NONRETRYABLE_BASE = genai_errors.APIError
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +126,7 @@ class AIReviewer:
         model: str | None = None,
         max_retries: int = MAX_RETRIES,
     ) -> None:
-        genai.configure(api_key=api_key)
-        self._model = genai.GenerativeModel(
-            model_name=model or self.DEFAULT_MODEL,
-            generation_config=_GENERATION_CONFIG,
-            system_instruction=SYSTEM_PROMPT,
-        )
+        self._client = genai.Client(api_key=api_key)
         self.model_name = model or self.DEFAULT_MODEL
         self.max_retries = max_retries
         logger.debug("AIReviewer initialised with model=%s", self.model_name)
@@ -159,10 +166,9 @@ class AIReviewer:
                 )
                 last_exc = exc
 
-            except (ResourceExhausted, DeadlineExceeded, ServiceUnavailable) as exc:
-                # ResourceExhausted  → quota / rate-limit  (analogous to RateLimitError)
-                # DeadlineExceeded   → request timeout      (analogous to APITimeoutError)
-                # ServiceUnavailable → transient 503        (safe to retry)
+            except _RETRYABLE_ERRORS as exc:
+                # ClientError 429 → rate-limit / quota exceeded
+                # ServerError 5xx → transient service error (503 etc.)
                 delay = self.RETRY_BASE_DELAY * (2 ** (attempt - 1))
                 logger.warning(
                     "Attempt %d/%d — Gemini API error (%s), retrying in %.1fs …",
@@ -174,8 +180,8 @@ class AIReviewer:
                 time.sleep(delay)
                 last_exc = exc
 
-            except GoogleAPICallError as exc:
-                # Non-transient Gemini error (e.g. invalid API key, bad request)
+            except _NONRETRYABLE_BASE as exc:
+                # Non-transient error (e.g. 400 bad request, 401 invalid key)
                 logger.error(
                     "Non-retryable Gemini API error for %s: %s",
                     changed_file.file_path,
@@ -223,29 +229,32 @@ class AIReviewer:
             diff_text=self._truncate_diff(changed_file.diff_text),
         )
 
-        response = self._model.generate_content(
-            user_prompt,
-            request_options={"timeout": _REQUEST_TIMEOUT},
+        response = self._client.models.generate_content(
+            model=self.model_name,
+            contents=user_prompt,
+            config=_GENERATE_CONFIG,
         )
 
-        # Gemini can return multiple candidates; take the first non-empty one
+        # Extract text from the first candidate part
         raw = ""
         if response.candidates:
-            raw = response.candidates[0].content.parts[0].text or ""
+            parts = response.candidates[0].content.parts
+            if parts:
+                raw = parts[0].text or ""
 
         # Fallback to the convenience .text accessor
         if not raw:
             try:
                 raw = response.text or ""
-            except ValueError:
-                # response.text raises ValueError when the response was blocked
+            except (ValueError, AttributeError):
                 finish_reason = (
                     response.candidates[0].finish_reason
                     if response.candidates
                     else "unknown"
                 )
-                raise GoogleAPICallError(  # type: ignore[arg-type]
-                    f"Gemini response was blocked or empty (finish_reason={finish_reason})"
+                raise genai_errors.APIError(  # type: ignore[call-arg]
+                    0,
+                    {"message": f"Gemini response was blocked or empty (finish_reason={finish_reason})"},
                 )
 
         logger.debug(
@@ -256,7 +265,7 @@ class AIReviewer:
         return raw
 
     # ------------------------------------------------------------------
-    # Parsing & validation  (provider-agnostic — identical to before)
+    # Parsing & validation  (provider-agnostic — unchanged)
     # ------------------------------------------------------------------
 
     @staticmethod
