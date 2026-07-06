@@ -169,6 +169,53 @@ class GitHubClient:
         except GithubException as exc:
             raise RuntimeError(f"Failed to post summary comment: {exc}") from exc
 
+    def post_inline_comments(self, pr_number: int, session: "ReviewSession") -> None:
+        """
+        Post each Issue as an individual inline PR review comment at its
+        exact line number, then post the summary as a separate issue comment.
+
+        Uses pr.create_review() so all inline comments are submitted in a
+        single API call, which avoids GitHub's per-file comment rate limits.
+        Falls back to post_summary_comment() if the review API call fails.
+        """
+        pr = self.get_pull_request(pr_number)
+        commit = pr.get_commits().reversed[0]  # latest commit on the PR
+
+        inline_comments: list[dict] = []
+        for result in session.results:
+            for issue in result.issues:
+                inline_comments.append(
+                    {
+                        "path": result.file_name,
+                        "line": issue.line_number,
+                        "body": self._format_inline_comment(issue),
+                    }
+                )
+
+        review_event = "REQUEST_CHANGES" if session.has_critical_issues else "COMMENT"
+        summary_body = self._format_summary_comment(session)
+
+        try:
+            pr.create_review(
+                commit=commit,
+                body=summary_body,
+                event=review_event,
+                comments=inline_comments,
+            )
+            logger.info(
+                "Posted inline review on PR #%d: %d comment(s), event=%s",
+                pr_number,
+                len(inline_comments),
+                review_event,
+            )
+        except GithubException as exc:
+            logger.error(
+                "create_review() failed for PR #%d (%s); falling back to summary comment",
+                pr_number,
+                exc,
+            )
+            self._post_fallback_comment(pr, summary_body)
+
     # ------------------------------------------------------------------
     # Comment formatters
     # ------------------------------------------------------------------

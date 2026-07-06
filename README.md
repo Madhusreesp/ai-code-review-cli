@@ -85,19 +85,19 @@ $env:GITHUB_TOKEN   = "ghp_..."
 Fetches the PR diff, runs AI review, and posts inline comments back to GitHub.
 
 ```bash
-python -m src.cli review --pr-number 42 --repo your-org/your-repo
+python -m src.cli --pr-number 42 --repo your-org/your-repo
 ```
 
 Use `--no-post` to do a dry-run (review without posting to GitHub):
 
 ```bash
-python -m src.cli review --pr-number 42 --repo your-org/your-repo --no-post
+python -m src.cli --pr-number 42 --repo your-org/your-repo --no-post
 ```
 
 ### Review a Local File
 
 ```bash
-python -m src.cli review --file src/auth/login.py
+python -m src.cli --file src/auth/login.py
 ```
 
 ### Review Local Git Diff
@@ -105,8 +105,8 @@ python -m src.cli review --file src/auth/login.py
 Compares your current branch against `main` (configurable via `--base`):
 
 ```bash
-python -m src.cli review --diff
-python -m src.cli review --diff --base develop
+python -m src.cli --diff
+python -m src.cli --diff --base develop
 ```
 
 ### Full Options
